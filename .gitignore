@@ -12,3 +12,4 @@ CS231n/assignment1/cs231n/datasets/cifar-10-batches-py/*
 .vscode/
 sutton_exercises/denny_exercises/
 crap/
+cifar10/
