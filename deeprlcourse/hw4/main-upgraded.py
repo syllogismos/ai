@@ -4,6 +4,8 @@ import gym
 import logz
 import scipy.signal
 
+from tensorflow.python import debug as tf_debug
+
 def normc_initializer(std=1.0):
     """
     Initialize array with normalized columns
@@ -192,9 +194,93 @@ def main_pendulum(n_iter=100, gamma=1.0, min_timesteps_per_batch=1000, stepsize=
     env = gym.make("Pendulum-v0")
     ob_dim = env.observation_space.shape[0]
     ac_dim = env.action_space.shape[0]
+    logz.configure_output_dir(logdir)
+    vf = LinearValueFunction()
 
-    YOUR_CODE_HERE
+    sy_ob_no = tf.placeholder(shape=[None, ob_dim], name='ob', dtype=tf.float32)
+    sy_ac_n = tf.placeholder(shape=[None, 1], name='ac', dtype=tf.float32)
+    sy_adv_n = tf.placeholder(shape=[None, 1], name='adv', dtype=tf.float32)
+    sy_h1 = tf.nn.relu(dense(sy_ob_no, 32, "h1", weight_init=normc_initializer(1.0)))
+    sy_h2 = tf.nn.relu(dense(sy_h1, 32, 'h2', weight_init=normc_initializer(1.0)))
+    sy_mean_na = 2.0*tf.nn.tanh(dense(sy_h2, ac_dim, 'mean', weight_init=normc_initializer(0.1)))
+    # sy_stddev_na = tf.get_variable('stddev', [ac_dim], initializer=tf.zeros_initializer())
+    sy_stddev_na = tf.constant([0.01])
+    sy_act_dist = tf.contrib.distributions.Normal(mu=sy_mean_na, sigma=sy_stddev_na)
+    sy_n = sy_ob_no.shape[0]
+    sy_sample_ac = tf.reshape(sy_act_dist.sample(1), [-1]) # shape 1 x N may need to reshape this
+    # sy_sample_ac = tf.clip_by_value(sy_sample_ac_unclipped, env.action_space.low[0], env.action_space.high[0])
+    sy_logprob_n = sy_act_dist.log_prob(sy_ac_n)
+    
+    # sy_old_mu = tf.placeholder(shape=[None, 1], name='oldmean', dtype=tf.float32)
+    # sy_old_dist = tf.contrib.distributions.Normal(mu=sy_old_mu, sigma=sy_stddev_na)
+
+    
+    
+    sy_surr = -tf.reduce_mean(sy_adv_n*sy_logprob_n)
+    update_op = tf.train.AdamOptimizer(stepsize).minimize(sy_surr)
+    train_op = tf.train.AdamOptimizer(stepsize).minimize(sy_surr)
+    sess = tf.Session()
+    # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+    # sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
+    sess.__enter__()
+    tf.global_variables_initializer().run()
+
+    total_timesteps = 0
+
+    for i in range(n_iter):
+        print("********** Iteration %i ****************"%i)
+        timesteps_this_batch = 0
+        paths = []
+        while True:
+            ob = env.reset()
+            terminated = False
+            obs, acs, rewards = [], [], []
+            animate_this_episode=(len(paths)==0 and (i % 10 == 0) and animate)
+            while True:
+                if animate_this_episode:
+                    env.render()
+                obs.append(ob)
+                ac = sess.run(sy_sample_ac, feed_dict={sy_ob_no: ob[None]})
+                acs.append(ac)
+                ob, rew, done, _ = env.step(ac)
+                rewards.append(rew)
+                if done:
+                    break
+            path = {'observation': np.array(obs), 'terminated': terminated,
+                    'reward': np.array(rewards), 'action': np.array(acs)}
+            paths.append(path)
+            timesteps_this_batch += pathlength(path)
+            if timesteps_this_batch > min_timesteps_per_batch:
+                break
+        total_timesteps += timesteps_this_batch
+
+        vtargs, vpreds, advs = [], [], []
+        for path in paths:
+            rew_t = path['reward']
+            return_t = discount(rew_t, gamma)
+            vpred_t = vf.predict(path['observation'])
+            adv_t = return_t - vpred_t
+            advs.append(adv_t)
+            vtargs.append(return_t)
+            vpreds.append(vpred_t)
+
+        ob_no = np.concatenate([path['observation'] for path in paths])
+        ac_n = np.concatenate([path['action'] for path in paths])
+        adv_n = np.concatenate(advs)
+
+        standardized_adv_n = (adv_n - adv_n.mean())/(adv_n.std() + 1e-8)
+        vtarg_n = np.concatenate(vtargs)
+        vpred_n = np.concatenate(vpreds)
+        vf.fit(ob_no, vtarg_n)
+
+        # policy update
+        # print "@@@@@@ training @@@@@@"
+        _, mean, stddev= sess.run([update_op, sy_mean_na, sy_stddev_na], feed_dict={
+            sy_ob_no: ob_no, sy_ac_n: ac_n, sy_adv_n: adv_n.reshape(-1, 1)
+        })
+        # print mean
+        # print stddev
 
 
 if __name__ == "__main__":
-    main_cartpole(logdir=None) # when you want to start collecting results, set the logdir
+    main_pendulum(n_iter=1000, logdir=None) # when you want to start collecting results, set the logdir
